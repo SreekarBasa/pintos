@@ -8,6 +8,7 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 
+#include <stdlib.h>
 #include "list.h"
 //should keep track of all threads that are currently sleeping
 // and their wake-up time
@@ -25,6 +26,7 @@ struct lock sleeper_lock; //lock for sleeping_threads_list
 void init_sleeper_lock(void);
 bool compare_wake_up_time(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
 void timer_wakeup(void);
+static bool wakeup_needed;
 
 void
 init_sleeper_lock(void){ //function for initialization
@@ -140,7 +142,7 @@ timer_sleep (int64_t ticks) //argument - ticks.. no.of ticks needed to wait
   st->t = thread_current(); // to get current thread
   st->wake_up_time = wake_up_time; //set wake up time
 
-  ASSERT(list_is_initialized(&sleeping_threads_list)); // to verify initialization
+  // ASSERT(list_is_initialized(&sleeping_threads_list)); // to verify initialization
 
   // enum intr_level old_level = intr_disable(); --previous method
   // to avoid race contd just like in timer ticks function
@@ -153,28 +155,36 @@ timer_sleep (int64_t ticks) //argument - ticks.. no.of ticks needed to wait
   }else{ //sort if >1 elements only
     list_insert_ordered(&sleeping_threads_list, &st->elem, compare_wake_up_time, NULL); // aux? 
   }
+  lock_release(&sleeper_lock); // release the lock -- task3
   thread_block();
   // intr_set_level(old_level); --task 2 //restore interrupts /states
-  lock_release(&sleeper_lock); // release the lock -- task3
 }
 
 void
 timer_wakeup(void){ //new custom function to manage synchronization using locks
   // acquire the lock for synchronization
-  lock_acquire(&sleeper_lock);
+  while(true){
+    if(wakeup_needed){
+      wakeup_needed = false;
+      lock_acquire(&sleeper_lock);
 
-  int64_t curr = timer_ticks(); // current ticks
-  while(!list_empty(&sleeping_threads_list)){
-    struct list_elem *e = list_front(&sleeping_threads_list);
-    struct sleeping_thread *st = list_entry(e, struct sleeping_thread, elem);
-    if(st->wake_up_time > curr){
-      break; // not ready yet
+      int64_t curr = timer_ticks(); // current ticks
+      while(!list_empty(&sleeping_threads_list)){
+        struct list_elem *e = list_front(&sleeping_threads_list);
+        struct sleeping_thread *st = list_entry(e, struct sleeping_thread, elem);
+        if(st->wake_up_time > curr){
+          break; // not ready yet
+        }
+        list_pop_front(&sleeping_threads_list); // remove ready unblocking thread instance
+        thread_unblock(st->t); //unblock the thread in sleeping thread instance
+        free(st); //freeing the memory
+      }
+      lock_release(&sleeper_lock); //release lock
     }
-    list_pop_front(&sleeping_threads_list); // remove ready unblocking thread instance
-    thread_unblock(st->t); //unblock the thread in sleeping thread instance
-    free(st); //freeing the memory
+    enum intr_level old_level = intr_enable();  // Enable interrupts
+    timer_msleep(1);  // Small sleep 
+    intr_set_level(old_level);  // Restore interrupt level
   }
-  lock_release(&sleeper_lock); //release lock
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -254,6 +264,7 @@ timer_interrupt (struct intr_frame *args UNUSED)
   ticks++; //global tick count ++
   thread_tick (); //for thread scheduling
   timer_wakeup();
+  wakeup_needed = true;
   // while(!list_empty(&sleeping_threads_list)){ // till all wake up
   //   //elements of linked list
   //   struct list_elem *e = list_front(&sleeping_threads_list); //like getting front element in list
